@@ -3,6 +3,11 @@
 #include <bitset>
 #include <cmath>
 #include <STM32FreeRTOS.h>
+#include <Wire.h>
+#include <Print.h>
+#include <stdlib.h>
+
+
 
 // Constants
 const uint32_t interval = 100; // Display update interval
@@ -45,14 +50,65 @@ constexpr uint32_t getstepsize(int f)
   uint64_t out = (((1 << 31) / fs) << 1) * f;
   return out;
 }
-
+#include <stdint.h>
 struct
 {
   std::bitset<32> inputs;
   SemaphoreHandle_t mutex;
-  int knobrotate; // Added for knob rotation variable
-  SemaphoreHandle_t mutex; 
+  uint8_t prevnobA  ;
+  uint8_t prevnobB ;
+  int knobrotate;
+  int lastRotationDirection;
 } sysState;
+
+int Quad(uint8_t previousA, uint8_t previousB, uint8_t currentA, uint8_t currentB) {
+  int rotationVariable = 0;
+
+  Serial.print("Prev A,B: ");
+  Serial.print(previousA);
+  Serial.print(",");
+  Serial.print(previousB);
+  Serial.print(" -> ");
+  Serial.print("Curr A,B: ");
+  Serial.print(currentA);
+  Serial.print(",");
+  Serial.println(currentB);
+
+  // Combine previous and current states into a 2-bit value
+  uint8_t prevState = (previousA << 1) | previousB;
+  uint8_t currState = (currentA << 1) | currentB;
+
+  // Define valid state transitions
+  switch (prevState) {
+      case 0b00: // Previous state 00
+          if (currState == 0b01) rotationVariable = +1; // 00 -> 01 (Clockwise)
+          else if (currState == 0b11) rotationVariable = sysState.lastRotationDirection;
+          break;
+      case 0b01: // Previous state 01
+          if (currState == 0b10) rotationVariable = sysState.lastRotationDirection;
+          else if (currState == 0b00) rotationVariable = -1; // 01 -> 00 (Counterclockwise)
+          break;
+      case 0b10: // Previous state 10
+          if (currState == 0b01) rotationVariable = sysState.lastRotationDirection; // 10 -> 00 (Clockwise)
+          else if (currState == 0b11) rotationVariable = -1; // 10 -> 11 (Counterclockwise)
+          break;
+      case 0b11: // Previous state 11
+          if (currState == 0b10) rotationVariable = +1; // 11 -> 10 (Clockwise)
+          else if (currState == 0b00) rotationVariable =sysState.lastRotationDirection;
+          break;
+  }
+
+  // Update the last direction after a valid transition
+  if (rotationVariable != 0) {
+      sysState.lastRotationDirection = rotationVariable;
+  }
+
+  return rotationVariable;
+}
+
+
+
+
 
 // constant step size
 constexpr uint32_t stepSizes[] = {
@@ -116,16 +172,15 @@ std::bitset<4> readCols()
 void scanKeysTask(void* pvParameters) {
   const TickType_t xFrequency = 50 / portTICK_PERIOD_MS;  // Scan the keys every 50 ms
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  
+  int localrotation = 0;
   while (1) {
       vTaskDelayUntil(&xLastWakeTime, xFrequency);  // Wait for the next scan cycle
-      
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);  // Access shared resources safely
 
       // Scan the keypad for all rows (3 rows in total)
-      for (int i = 0; i < 3; i++) {
+      for (int i = 0; i < 4; i++) {
           setRow(i);
-          delayMicroseconds(5);  // Delay to stabilize readings
+          delayMicroseconds(7);  // Delay to stabilize readings
           std::bitset<4> inputcol = readCols();
           sysState.inputs[i * 4] = inputcol[0];
           sysState.inputs[i * 4 + 1] = inputcol[1];
@@ -140,14 +195,24 @@ void scanKeysTask(void* pvParameters) {
               localCurrentStepSize = stepSizes[i];
           }
       }
+  
+      uint8_t currentA = sysState.inputs[12];
+      uint8_t currentB = sysState.inputs[13];
 
-      xSemaphoreGive(sysState.mutex);  // Release the mutex
+      
+
+      sysState.knobrotate = sysState.knobrotate + Quad(sysState.prevnobA, sysState.prevnobB, currentA, currentB);
+      sysState.prevnobA = currentA;
+      sysState.prevnobB = currentB;
+      Serial.print(sysState.knobrotate);
+     
+
+      xSemaphoreGive(sysState.mutex);  // Release mutex
 
       // Update the global current step size
       __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }
 }
-
 
 
 void displayUpdateTask(void *pvParameters)
@@ -161,6 +226,7 @@ void displayUpdateTask(void *pvParameters)
 
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.setCursor(2, 10);
     u8g2.drawStr(2, 10, "Hello World!");
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY); // Take mutex
@@ -181,9 +247,11 @@ void displayUpdateTask(void *pvParameters)
       u8g2.print(message.c_str());
     }
 
-    u8g2.setCursor(0, 40);
-    u8g2.print("Knob Rotate: ");
-    u8g2.print(sysState.knobrotate); // Print the rotation count
+    u8g2.setCursor(20, 30);
+    
+    u8g2.print(sysState.knobrotate);
+
+
     xSemaphoreGive(sysState.mutex);  // Release mutex
     u8g2.sendBuffer();
 
@@ -195,6 +263,8 @@ void setup()
 {
   // put your setup code here, to run once:
   sysState.mutex = xSemaphoreCreateMutex();
+  
+  
   // Set pin directions
   pinMode(RA0_PIN, OUTPUT);
   pinMode(RA1_PIN, OUTPUT);
@@ -221,7 +291,7 @@ void setup()
 
   // Initialise UART
   Serial.begin(9600);
-  Serial.println("Hello World");
+ Serial.println("Hello World");
 
   TaskHandle_t displayUpdateTaskHandle = NULL;
   xTaskCreate(
