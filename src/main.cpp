@@ -130,7 +130,9 @@ void sampleISR()
   static uint32_t phaseAcc = 0;
   phaseAcc += currentStepSize;
   int32_t Vout = (phaseAcc >> 24) - 128;
+  Vout = Vout >> (8 - sysState.knobrotate);
   analogWrite(OUTR_PIN, Vout + 128);
+  
 }
 
 // Display driver object
@@ -180,7 +182,7 @@ void scanKeysTask(void* pvParameters) {
       // Scan the keypad for all rows (3 rows in total)
       for (int i = 0; i < 4; i++) {
           setRow(i);
-          delayMicroseconds(7);  // Delay to stabilize readings
+          delayMicroseconds(40);  // Delay to stabilize readings
           std::bitset<4> inputcol = readCols();
           sysState.inputs[i * 4] = inputcol[0];
           sysState.inputs[i * 4 + 1] = inputcol[1];
@@ -202,6 +204,7 @@ void scanKeysTask(void* pvParameters) {
       
 
       sysState.knobrotate = sysState.knobrotate + Quad(sysState.prevnobA, sysState.prevnobB, currentA, currentB);
+      if (sysState.knobrotate >8) sysState.knobrotate=8;
       sysState.prevnobA = currentA;
       sysState.prevnobB = currentB;
       Serial.print(sysState.knobrotate);
